@@ -11,16 +11,22 @@ Usage:
 Expected: All tests pass with 200 OK responses
 """
 
+import os
 import requests
 import json
 import sys
 from cryptography.fernet import Fernet
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Configuration - UPDATE THIS WITH YOUR RENDER URL
-RENDER_URL = "https://forecast-ingestion.onrender.com"
-API_KEY = "BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM"
-ENCRYPTION_KEY = "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA="
+RENDER_URL = os.environ.get("RENDER_URL", "https://forecast-ingestion.onrender.com")
+API_KEY = os.environ.get("INGESTION_API_KEY", "")
+if not API_KEY:
+    raise ValueError("INGESTION_API_KEY environment variable not set")
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA=")
 
 # Colors for terminal output
 GREEN = '\033[92m'
