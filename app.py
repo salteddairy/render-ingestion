@@ -1,6 +1,8 @@
 """
 Render Ingestion Service for SAP Agent Data
 Receives encrypted SAP B1 data and stores it in Supabase
+
+Updated: 2026-01-28 - Added rate limiting
 """
 
 from flask import Flask, request, jsonify
@@ -10,6 +12,9 @@ import os
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
+
+# Import rate limiting
+from middleware.rate_limiter import rate_limit
 
 # Load environment variables
 load_dotenv()
@@ -75,6 +80,7 @@ DATA_TYPE_HANDLERS = {
 
 
 @app.route('/health', methods=['GET'])
+@rate_limit(limit_name='health')  # 1000 requests per minute
 def health_check():
     """Health check endpoint for monitoring."""
     return jsonify({
@@ -86,6 +92,7 @@ def health_check():
 
 
 @app.route('/api/ingest', methods=['POST'])
+@rate_limit(limit=1000, period=3600)  # 1000 requests per hour by IP
 def ingest_data():
     """
     Main ingestion endpoint for SAP Agent data.
