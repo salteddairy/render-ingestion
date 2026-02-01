@@ -188,7 +188,22 @@ def upsert_records_batch(
         return {'processed': processed, 'failed': failed}
 
     # Use transaction manager for batch processing
-    from transaction_manager import TransactionManager
+    # Import with full path handling for Render
+    import importlib.util
+    import sys
+
+    # Get the directory where this file (supabase_client.py) is located
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Construct path to transaction_manager.py
+    tm_path = os.path.join(current_dir, 'transaction_manager.py')
+
+    # Load the module dynamically
+    spec = importlib.util.spec_from_file_location('transaction_manager', tm_path)
+    tm_module = importlib.util.module_from_spec(spec)
+    sys.modules['transaction_manager'] = tm_module
+    spec.loader.exec_module(tm_module)
+
+    TransactionManager = tm_module.TransactionManager
 
     manager = TransactionManager()
     result = manager.execute_batch(
