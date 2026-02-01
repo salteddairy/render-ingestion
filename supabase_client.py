@@ -89,9 +89,6 @@ def upsert_records(
     Returns:
         Dictionary with 'processed' and 'failed' counts
     """
-    import sys
-    sys.path.insert(0, '/D/code/forecastv3')
-
     from src.retry_utils import retry_with_backoff, RETRY_DATABASE
     from src.circuit_breaker import ingestion_breaker, CircuitBreakerError
 
@@ -159,9 +156,6 @@ def upsert_records_batch(
 
     def batch_operation(batch_records: List[Dict[str, Any]]) -> Dict[str, int]:
         """Process a batch of records."""
-        import sys
-        sys.path.insert(0, '/D/code/forecastv3')
-
         from src.retry_utils import retry_with_backoff, RETRY_DATABASE
         from src.circuit_breaker import ingestion_breaker, CircuitBreakerError
 
