@@ -149,8 +149,6 @@ def upsert_records_batch(
     Returns:
         Dictionary with 'processed', 'failed', 'is_partial', 'errors' counts
     """
-    from transaction_manager import transaction_manager
-
     if not records:
         return {'processed': 0, 'failed': 0, 'is_partial': False}
 
