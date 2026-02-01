@@ -412,3 +412,40 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=port)
 # Force redeploy
 # Deploy verification
+
+
+@app.route('/debug/test-imports', methods=['GET'])
+def debug_test_imports():
+    """Debug endpoint to test if imports work"""
+    try:
+        # Test dynamic import
+        import importlib.util
+        import sys
+        import os
+
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        tm_path = os.path.join(current_dir, 'transaction_manager.py')
+
+        if 'transaction_manager' not in sys.modules:
+            spec = importlib.util.spec_from_file_location('transaction_manager', tm_path)
+            tm_module = importlib.util.module_from_spec(spec)
+            sys.modules['transaction_manager'] = tm_module
+            spec.loader.exec_module(tm_module)
+
+        from transaction_manager import TransactionManager, validate_inventory_record
+
+        return jsonify({
+            "status": "success",
+            "message": "transaction_manager imported successfully",
+            "tm_in_sysmodules": 'transaction_manager' in sys.modules,
+            "current_dir": current_dir,
+            "tm_path_exists": os.path.exists(tm_path),
+            "tm_path": tm_path
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
