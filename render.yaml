@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 4 --timeout 120 --pythonpath - app:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 3 --timeout 120 app:app
     healthCheckPath: /health
     envVars:
       - key: API_KEY
@@ -14,9 +14,13 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
       - key: LOG_LEVEL
         value: INFO
       - key: PORT
         value: 8080
       - key: PYTHONPATH
-        value: .:/opt/render/project/src
+        value: .
