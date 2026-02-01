@@ -5,6 +5,11 @@ Receives encrypted SAP B1 data and stores it in Supabase
 Updated: 2026-01-28 - Added rate limiting and error logging endpoint
 """
 
+import sys
+import os
+# Ensure current directory is in Python path for module imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from flask import Flask, request, jsonify
 from cryptography.fernet import Fernet
 import json
