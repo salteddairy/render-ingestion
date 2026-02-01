@@ -20,6 +20,8 @@ from psycopg2.extras import Json
 from middleware.rate_limiter import rate_limit
 # Import idempotency middleware
 from middleware.idempotency import IdempotencyMiddleware
+# Import transaction manager to ensure it's available for lazy imports
+import transaction_manager
 
 # Load environment variables
 load_dotenv()
