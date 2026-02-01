@@ -188,7 +188,7 @@ def upsert_records_batch(
         return {'processed': processed, 'failed': failed}
 
     # Use transaction manager for batch processing
-    # Import with full path handling for Render
+    # Import with full path handling for Render to bypass PYTHONPATH issues
     import importlib.util
     import sys
 
@@ -197,13 +197,14 @@ def upsert_records_batch(
     # Construct path to transaction_manager.py
     tm_path = os.path.join(current_dir, 'transaction_manager.py')
 
-    # Load the module dynamically
-    spec = importlib.util.spec_from_file_location('transaction_manager', tm_path)
-    tm_module = importlib.util.module_from_spec(spec)
-    sys.modules['transaction_manager'] = tm_module
-    spec.loader.exec_module(tm_module)
+    # Load the module dynamically if not already loaded
+    if 'transaction_manager' not in sys.modules:
+        spec = importlib.util.spec_from_file_location('transaction_manager', tm_path)
+        tm_module = importlib.util.module_from_spec(spec)
+        sys.modules['transaction_manager'] = tm_module
+        spec.loader.exec_module(tm_module)
 
-    TransactionManager = tm_module.TransactionManager
+    from transaction_manager import TransactionManager
 
     manager = TransactionManager()
     result = manager.execute_batch(
