@@ -190,7 +190,10 @@ def upsert_records_batch(
         return {'processed': processed, 'failed': failed}
 
     # Use transaction manager for batch processing
-    result = transaction_manager.execute_batch(
+    from transaction_manager import TransactionManager
+
+    manager = TransactionManager()
+    result = manager.execute_batch(
         records=records,
         operation_func=batch_operation,
         validator_func=validator_func,
