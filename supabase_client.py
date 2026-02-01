@@ -11,8 +11,8 @@ import time
 import logging
 import sys
 
-# Add parent directory for imports
-sys.path.insert(0, '/D/code/forecastv3')
+# Add current directory for imports (works on both local and Render)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 logger = logging.getLogger(__name__)
 
