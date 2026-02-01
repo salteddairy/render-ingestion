@@ -9,6 +9,10 @@ from supabase import create_client, Client
 from datetime import datetime
 import time
 import logging
+import sys
+
+# Add parent directory for imports
+sys.path.insert(0, '/D/code/forecastv3')
 
 logger = logging.getLogger(__name__)
 
@@ -20,23 +24,39 @@ def get_supabase_client() -> Client:
     """
     Get or initialize Supabase client singleton.
 
+    Environment Variables:
+        SUPABASE_URL: Supabase project URL (required)
+        Format: https://your-project.supabase.co
+
+        SUPABASE_SERVICE_ROLE_KEY: Supabase service role JWT key (required)
+        Format: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        Obtained from: Supabase Dashboard → Project Settings → API
+
     Returns:
         Supabase client instance
 
     Raises:
-        ValueError: If DATABASE_URL is not set
+        ValueError: If SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set
     """
     global _supabase_client
 
     if _supabase_client is None:
-        database_url = os.getenv("DATABASE_URL")
+        # Load Supabase credentials from environment
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-        if not database_url:
-            logger.error("DATABASE_URL environment variable not set")
-            raise ValueError("DATABASE_URL environment variable not set")
+        # Validate required environment variables
+        if not supabase_url:
+            logger.error("SUPABASE_URL environment variable not set")
+            raise ValueError("SUPABASE_URL environment variable not set")
+
+        if not supabase_key:
+            logger.error("SUPABASE_SERVICE_ROLE_KEY environment variable not set")
+            raise ValueError("SUPABASE_SERVICE_ROLE_KEY environment variable not set")
 
         try:
-            _supabase_client = create_client(database_url)
+            # Initialize Supabase client with URL and service role key
+            _supabase_client = create_client(supabase_url, supabase_key)
             logger.info("Supabase client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize Supabase client: {str(e)}")
@@ -52,17 +72,29 @@ def upsert_records(
     retry_delay: float = 1.0
 ) -> Dict[str, int]:
     """
-    Upsert records to Supabase table with retry logic.
+    Upsert records to Supabase table with retry logic and circuit breaker.
+
+    Enhanced with:
+    - Exponential backoff with jitter
+    - Circuit breaker for cascading failure prevention
+    - Comprehensive error handling
+    - Detailed logging
 
     Args:
         table_name: Name of the Supabase table
         records: List of records to upsert
-        max_retries: Maximum number of retry attempts
-        retry_delay: Delay between retries in seconds
+        max_retries: Maximum number of retry attempts (kept for backward compatibility)
+        retry_delay: Initial delay between retries in seconds (kept for backward compatibility)
 
     Returns:
         Dictionary with 'processed' and 'failed' counts
     """
+    import sys
+    sys.path.insert(0, '/D/code/forecastv3')
+
+    from src.retry_utils import retry_with_backoff, RETRY_DATABASE
+    from src.circuit_breaker import ingestion_breaker, CircuitBreakerError
+
     if not records:
         return {'processed': 0, 'failed': 0}
 
@@ -70,38 +102,116 @@ def upsert_records(
     failed = 0
 
     for record in records:
-        retry_count = 0
-        success = False
-
-        while retry_count < max_retries and not success:
-            try:
+        try:
+            @retry_with_backoff(
+                exceptions=(Exception,),
+                config=RETRY_DATABASE
+            )
+            @ingestion_breaker.call
+            def _upsert_with_retry():
                 client = get_supabase_client()
-
                 # Perform upsert
                 client.table(table_name).upsert(record).execute()
+                return True
 
-                processed += 1
-                success = True
+            _upsert_with_retry()
+            processed += 1
+            logger.debug(f"Successfully upserted record to {table_name}")
 
-                logger.debug(f"Successfully upserted record to {table_name}")
+        except CircuitBreakerError:
+            logger.error(f"Circuit breaker is open for ingestion operations")
+            failed += 1
+            # Break circuit is open, no point continuing
+            break
 
-            except Exception as e:
-                retry_count += 1
-                logger.warning(
-                    f"Upsert failed for {table_name} (attempt {retry_count}/{max_retries}): {str(e)}"
-                )
-
-                if retry_count < max_retries:
-                    time.sleep(retry_delay)
-                else:
-                    logger.error(f"Failed to upsert record to {table_name} after {max_retries} attempts: {str(e)}")
-                    failed += 1
+        except Exception as e:
+            logger.error(f"Failed to upsert record to {table_name} after all retries: {str(e)}")
+            failed += 1
 
     return {'processed': processed, 'failed': failed}
 
 
+def upsert_records_batch(
+    table_name: str,
+    records: List[Dict[str, Any]],
+    validator_func: Optional[Any] = None
+) -> Dict[str, int]:
+    """
+    Upsert records to Supabase table with transactional batch semantics.
+
+    This function provides better consistency than upsert_records by:
+    1. Pre-validating all records before any processing
+    2. Processing all records with error collection
+    3. Returning detailed results for manual review
+
+    Args:
+        table_name: Name of the Supabase table
+        records: List of records to upsert
+        validator_func: Optional validation function
+
+    Returns:
+        Dictionary with 'processed', 'failed', 'is_partial', 'errors' counts
+    """
+    from transaction_manager import transaction_manager
+
+    if not records:
+        return {'processed': 0, 'failed': 0, 'is_partial': False}
+
+    def batch_operation(batch_records: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Process a batch of records."""
+        import sys
+        sys.path.insert(0, '/D/code/forecastv3')
+
+        from src.retry_utils import retry_with_backoff, RETRY_DATABASE
+        from src.circuit_breaker import ingestion_breaker, CircuitBreakerError
+
+        processed = 0
+        failed = 0
+
+        for record in batch_records:
+            try:
+                @retry_with_backoff(
+                    exceptions=(Exception,),
+                    config=RETRY_DATABASE
+                )
+                @ingestion_breaker.call
+                def _upsert_with_retry():
+                    client = get_supabase_client()
+                    client.table(table_name).upsert(record).execute()
+                    return True
+
+                _upsert_with_retry()
+                processed += 1
+                logger.debug(f"Successfully upserted record to {table_name}")
+
+            except CircuitBreakerError:
+                logger.error(f"Circuit breaker is open for ingestion operations")
+                failed += len(batch_records) - processed
+                break
+
+            except Exception as e:
+                logger.error(f"Failed to upsert record to {table_name} after all retries: {str(e)}")
+                failed += 1
+
+        return {'processed': processed, 'failed': failed}
+
+    # Use transaction manager for batch processing
+    result = transaction_manager.execute_batch(
+        records=records,
+        operation_func=batch_operation,
+        validator_func=validator_func,
+        batch_size=50  # Process in batches of 50
+    )
+
+    return result.to_dict()
+
+
 def upsert_warehouses(records: List[Dict[str, Any]]) -> Dict[str, int]:
-    """Upsert warehouse records to Supabase."""
+    """
+    Upsert warehouse records to Supabase with transactional batch processing.
+    """
+    from transaction_manager import validate_warehouse_record
+
     clean_records = []
 
     for record in records:
@@ -109,13 +219,14 @@ def upsert_warehouses(records: List[Dict[str, Any]]) -> Dict[str, int]:
             clean_records.append({
                 'warehouse_code': record.get('warehouse_code'),
                 'warehouse_name': record.get('warehouse_name'),
+                'region': record.get('region', 'UNKNOWN'),
                 'is_active': bool(record.get('is_active', 1)),
                 'updated_at': datetime.utcnow().isoformat()
             })
         except Exception as e:
             logger.error(f"Error preparing warehouse record: {str(e)}")
 
-    return upsert_records('warehouses', clean_records)
+    return upsert_records_batch('warehouses', clean_records, validate_warehouse_record)
 
 
 def upsert_vendors(records: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -147,7 +258,7 @@ def upsert_items(records: List[Dict[str, Any]]) -> Dict[str, int]:
         try:
             clean_records.append({
                 'item_code': record.get('item_code'),
-                'item_name': record.get('item_name'),
+                'item_description': record.get('item_description'),
                 'item_group': record.get('item_group'),
                 'is_active': bool(record.get('is_active', 1)),
                 'updated_at': datetime.utcnow().isoformat()
@@ -159,7 +270,13 @@ def upsert_items(records: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 def upsert_inventory(records: List[Dict[str, Any]]) -> Dict[str, int]:
-    """Upsert inventory records to Supabase."""
+    """
+    Upsert inventory records to Supabase with transactional batch processing.
+
+    CRITICAL: This table joins items and warehouses, so consistency is vital.
+    """
+    from transaction_manager import validate_inventory_record
+
     clean_records = []
 
     for record in records:
@@ -167,18 +284,25 @@ def upsert_inventory(records: List[Dict[str, Any]]) -> Dict[str, int]:
             clean_records.append({
                 'item_code': record.get('item_code'),
                 'warehouse_code': record.get('warehouse_code'),
-                'quantity': float(record.get('quantity', 0)),
-                'unit_price': float(record.get('unit_price', 0)),
+                'on_hand_qty': float(record.get('on_hand_qty', 0)),
+                'on_order_qty': float(record.get('on_order_qty', 0)),
+                'committed_qty': float(record.get('committed_qty', 0)),
+                'available_qty': float(record.get('available_qty', 0)),
+                'unit_cost': float(record.get('unit_cost', 0)),
                 'updated_at': datetime.utcnow().isoformat()
             })
         except Exception as e:
             logger.error(f"Error preparing inventory record: {str(e)}")
 
-    return upsert_records('inventory_current', clean_records)
+    return upsert_records_batch('inventory_current', clean_records, validate_inventory_record)
 
 
 def upsert_sales_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
-    """Upsert sales order records to Supabase."""
+    """
+    Upsert sales order records to Supabase with transactional batch processing.
+    """
+    from transaction_manager import validate_sales_order_record
+
     clean_records = []
 
     for record in records:
@@ -188,6 +312,7 @@ def upsert_sales_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
                 'order_date': record.get('order_date'),
                 'customer_code': record.get('customer_code'),
                 'item_code': record.get('item_code'),
+                'warehouse_code': record.get('warehouse_code', ''),
                 'quantity': int(record.get('quantity')),
                 'unit_price': float(record.get('unit_price', 0)),
                 'line_total': float(record.get('line_total', 0)),
@@ -196,11 +321,15 @@ def upsert_sales_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
         except Exception as e:
             logger.error(f"Error preparing sales order record: {str(e)}")
 
-    return upsert_records('sales_orders', clean_records)
+    return upsert_records_batch('sales_orders', clean_records, validate_sales_order_record)
 
 
 def upsert_purchase_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
-    """Upsert purchase order records to Supabase."""
+    """
+    Upsert purchase order records to Supabase with transactional batch processing.
+    """
+    from transaction_manager import validate_purchase_order_record
+
     clean_records = []
 
     for record in records:
@@ -210,6 +339,7 @@ def upsert_purchase_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
                 'order_date': record.get('order_date'),
                 'vendor_code': record.get('vendor_code'),
                 'item_code': record.get('item_code'),
+                'warehouse_code': record.get('warehouse_code', ''),
                 'quantity': int(record.get('quantity')),
                 'unit_price': float(record.get('unit_price', 0)),
                 'line_total': float(record.get('line_total', 0)),
@@ -218,7 +348,7 @@ def upsert_purchase_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
         except Exception as e:
             logger.error(f"Error preparing purchase order record: {str(e)}")
 
-    return upsert_records('purchase_orders', clean_records)
+    return upsert_records_batch('purchase_orders', clean_records, validate_purchase_order_record)
 
 
 def upsert_costs(records: List[Dict[str, Any]]) -> Dict[str, int]:
