@@ -2,19 +2,24 @@
 Render Ingestion Service for SAP Agent Data
 Receives encrypted SAP B1 data and stores it in Supabase
 
-Updated: 2026-01-28 - Added rate limiting
+Updated: 2026-01-28 - Added rate limiting and error logging endpoint
 """
 
 from flask import Flask, request, jsonify
 from cryptography.fernet import Fernet
 import json
 import os
+import secrets  # For constant-time comparison to prevent timing attacks
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import Json
 
 # Import rate limiting
 from middleware.rate_limiter import rate_limit
+# Import idempotency middleware
+from middleware.idempotency import IdempotencyMiddleware
 
 # Load environment variables
 load_dotenv()
@@ -49,6 +54,7 @@ app = Flask(__name__)
 # Configuration from environment variables
 API_KEY = os.getenv("API_KEY")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not API_KEY:
     logger.error("API_KEY environment variable not set")
@@ -65,6 +71,18 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize cipher: {str(e)}")
     raise
+
+# Database connection helper
+def get_db_connection():
+    """Get a connection to the Supabase database."""
+    if not DATABASE_URL:
+        logger.error("DATABASE_URL environment variable not set")
+        raise ValueError("DATABASE_URL environment variable not set")
+    return psycopg2.connect(DATABASE_URL)
+
+# Initialize idempotency middleware
+idempotency_middleware = IdempotencyMiddleware(get_db_connection)
+logger.info("Idempotency middleware initialized")
 
 # Data type handlers mapping
 DATA_TYPE_HANDLERS = {
@@ -93,6 +111,7 @@ def health_check():
 
 @app.route('/api/ingest', methods=['POST'])
 @rate_limit(limit=1000, period=3600)  # 1000 requests per hour by IP
+@idempotency_middleware.check_idempotency  # Prevent duplicate processing
 def ingest_data():
     """
     Main ingestion endpoint for SAP Agent data.
@@ -105,9 +124,9 @@ def ingest_data():
     5. Return success response
     """
 
-    # Step 1: Validate API key
+    # Step 1: Validate API key (constant-time comparison to prevent timing attacks)
     api_key = request.headers.get("X-API-Key")
-    if api_key != API_KEY:
+    if not secrets.compare_digest(api_key, API_KEY):
         logger.warning(f"Unauthorized access attempt from {request.remote_addr}")
         return jsonify({
             "success": False,
@@ -207,6 +226,161 @@ def ingest_data():
             "success": False,
             "error": f"Processing failed: {str(e)}"
         }), 500
+
+
+@app.route('/api/v1/error-logs', methods=['POST'])
+@rate_limit(limit=500, period=3600)  # 500 requests per hour
+def receive_error_logs():
+    """
+    Error log ingestion endpoint for SAP B1 Agent.
+
+    Receives error logs from the SAP Agent in plain JSON format.
+    Unlike /api/ingest, this endpoint does NOT decrypt payloads.
+
+    Protocol: See docs/render/RENDER_ERROR_LOGGING_PROTOCOL.md
+
+    Request Format:
+    {
+        "source": "sap-b1-agent",
+        "batch_id": "uuid",
+        "chunk_index": 0,
+        "total_chunks": 1,
+        "error_count": 2,
+        "errors": [...]
+    }
+    """
+    # Step 1: Validate API key (constant-time comparison to prevent timing attacks)
+    api_key = request.headers.get("X-API-Key")
+    if not secrets.compare_digest(api_key, API_KEY):
+        logger.warning(f"Unauthorized error log attempt from {request.remote_addr}")
+        return jsonify({
+            "success": False,
+            "error": "Unauthorized",
+            "batch_id": request.json.get('batch_id') if request.is_json else None
+        }), 401
+
+    # Step 2: Get and validate request body
+    try:
+        request_data = request.get_json(force=True)
+    except Exception as e:
+        logger.error(f"Invalid JSON in error log request: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Invalid JSON"
+        }), 400
+
+    # Step 3: Validate required fields
+    required_fields = ['source', 'batch_id', 'chunk_index', 'total_chunks', 'error_count', 'errors']
+    missing_fields = [f for f in required_fields if f not in request_data]
+
+    if missing_fields:
+        logger.error(f"Missing required fields in error log: {missing_fields}")
+        return jsonify({
+            "success": False,
+            "error": f"Missing required fields: {', '.join(missing_fields)}"
+        }), 400
+
+    # Step 4: Validate source
+    if request_data['source'] != 'sap-b1-agent':
+        logger.error(f"Invalid source in error log: {request_data['source']}")
+        return jsonify({
+            "success": False,
+            "error": "Invalid source"
+        }), 400
+
+    batch_id = request_data['batch_id']
+    chunk_index = request_data['chunk_index']
+    total_chunks = request_data['total_chunks']
+    errors = request_data['errors']
+
+    logger.info(f"Received error log batch {batch_id} chunk {chunk_index+1}/{total_chunks} with {len(errors)} errors")
+
+    # Step 5: Insert error logs into database (idempotent)
+    conn = None
+    processed = 0
+    failed = 0
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        for error in errors:
+            try:
+                # Validate required error fields
+                error_required = ['error_id', 'timestamp', 'level', 'logger', 'message', 'location', 'hostname', 'process_id', 'thread_id']
+                if not all(field in error for field in error_required):
+                    logger.warning(f"Error missing required fields: {error.get('error_id', 'unknown')}")
+                    failed += 1
+                    continue
+
+                # Extract location data
+                location = error.get('location', {})
+                exception = error.get('exception')
+
+                # Insert with ON CONFLICT for idempotency
+                cursor.execute("""
+                    INSERT INTO error_logs (
+                        error_id, timestamp, level, logger, message,
+                        location_file, location_line, location_function, location_module,
+                        exception_type, exception_message, exception_traceback, exception_module,
+                        context, hostname, process_id, thread_id
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    ON CONFLICT (error_id) DO NOTHING
+                """, (
+                    error['error_id'],
+                    error['timestamp'],
+                    error['level'],
+                    error['logger'],
+                    error['message'],
+                    location.get('file'),
+                    location.get('line'),
+                    location.get('function'),
+                    location.get('module'),
+                    exception.get('type') if exception else None,
+                    exception.get('message') if exception else None,
+                    exception.get('traceback') if exception else None,
+                    exception.get('module') if exception else None,
+                    Json(error.get('context', {})),
+                    error['hostname'],
+                    error['process_id'],
+                    error['thread_id']
+                ))
+
+                processed += 1
+
+            except Exception as e:
+                logger.error(f"Failed to insert error {error.get('error_id', 'unknown')}: {str(e)}")
+                failed += 1
+
+        # Commit transaction
+        conn.commit()
+        logger.info(f"Error log batch processed: {processed} inserted, {failed} failed")
+
+        return jsonify({
+            "success": True,
+            "processed": processed,
+            "failed": failed,
+            "batch_id": batch_id
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error log ingestion failed: {str(e)}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({
+            "success": False,
+            "error": f"Database error: {str(e)}",
+            "batch_id": batch_id
+        }), 500
+
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # ============ ERROR HANDLERS ============

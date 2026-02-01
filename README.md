@@ -71,8 +71,8 @@ cp .env.example .env
 
 # Edit .env with your values
 # Required variables:
-# - API_KEY: BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM
-# - ENCRYPTION_KEY: RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA=
+# - API_KEY: YOUR_API_KEY_HERE
+# - ENCRYPTION_KEY: YOUR_ENCRYPTION_KEY_HERE
 # - DATABASE_URL: Your Supabase PostgreSQL connection string
 ```
 
@@ -122,8 +122,8 @@ from cryptography.fernet import Fernet
 
 # Configuration
 ENDPOINT = "http://localhost:8080/api/ingest"
-API_KEY = "BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM"
-ENCRYPTION_KEY = "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA="
+API_KEY = "YOUR_API_KEY_HERE"
+ENCRYPTION_KEY = "YOUR_ENCRYPTION_KEY_HERE"
 
 # Create test data
 test_payload = {
@@ -195,8 +195,8 @@ git push -u origin master
 Go to your service dashboard → **Environment** tab and add:
 
 ```
-API_KEY=BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM
-ENCRYPTION_KEY=RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA=
+API_KEY=YOUR_API_KEY_HERE
+ENCRYPTION_KEY=YOUR_ENCRYPTION_KEY_HERE
 DATABASE_URL=postgresql://postgres:[password]@[host]:5432/postgres
 LOG_LEVEL=INFO
 ```
@@ -220,7 +220,7 @@ Main endpoint for receiving SAP Agent data.
 
 **Headers:**
 ```
-X-API-Key: BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM
+X-API-Key: YOUR_API_KEY_HERE
 Content-Type: application/json
 ```
 

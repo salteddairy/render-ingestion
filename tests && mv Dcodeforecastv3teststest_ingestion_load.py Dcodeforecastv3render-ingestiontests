@@ -1,0 +1,633 @@
+"""
+Security Tests for Render Ingestion Service
+Tests for security vulnerabilities and attack vectors
+"""
+
+import pytest
+import json
+import os
+from cryptography.fernet import Fernet
+from unittest.mock import patch
+
+# Set environment variables before importing app
+os.environ["API_KEY"] = "test_api_key_1234567890"
+os.environ["ENCRYPTION_KEY"] = "test_encryption_key_32_characters_long!"
+os.environ["DATABASE_URL"] = "postgresql://test:test@localhost:5432/test"
+os.environ["LOG_LEVEL"] = "ERROR"
+
+from app import app, cipher
+
+
+class TestSQLInjection:
+    """Test SQL injection attack prevention."""
+
+    @patch('supabase_client.get_supabase_client')
+    def test_sql_injection_in_warehouse_name(self, mock_db_client):
+        """Test SQL injection in warehouse_name field."""
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [
+                    {
+                        "warehouse_code": "TEST",
+                        "warehouse_name": "'; DROP TABLE warehouses; --",
+                        "is_active": 1
+                    }
+                ]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should handle without error (parameterized queries protect)
+            assert response.status_code == 200
+
+            # Verify malicious SQL not passed directly
+            call_args = mock_client.table.return_value.upsert.call_args
+            stored_record = call_args[0][0]
+            assert "'; DROP TABLE" in stored_record['warehouse_name']
+
+    @patch('supabase_client.get_supabase_client')
+    def test_sql_injection_in_item_code(self, mock_db_client):
+        """Test SQL injection in item_code field."""
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            payload = {
+                "data_type": "items_full",
+                "records": [
+                    {
+                        "item_code": "1' OR '1'='1",
+                        "item_name": "Test",
+                        "item_group": "Test",
+                        "is_active": 1
+                    }
+                ]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 200
+
+    @patch('supabase_client.get_supabase_client')
+    def test_union_based_sql_injection(self, mock_db_client):
+        """Test UNION-based SQL injection."""
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            payload = {
+                "data_type": "vendors_full",
+                "records": [
+                    {
+                        "vendor_code": "TEST",
+                        "vendor_name": "Test' UNION SELECT * FROM users --",
+                        "is_active": 1
+                    }
+                ]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 200
+
+
+class TestXSSPrevention:
+    """Test XSS (Cross-Site Scripting) prevention."""
+
+    @patch('supabase_client.get_supabase_client')
+    def test_xss_in_warehouse_name(self, mock_db_client):
+        """Test XSS in warehouse_name field."""
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [
+                    {
+                        "warehouse_code": "TEST",
+                        "warehouse_name": "<script>alert('XSS')</script>",
+                        "is_active": 1
+                    }
+                ]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should accept data (XSS protection is frontend responsibility)
+            assert response.status_code == 200
+
+    @patch('supabase_client.get_supabase_client')
+    def test_xss_in_email_field(self, mock_db_client):
+        """Test XSS in email field."""
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            payload = {
+                "data_type": "vendors_full",
+                "records": [
+                    {
+                        "vendor_code": "TEST",
+                        "vendor_name": "Test Vendor",
+                        "email": "<img src=x onerror=alert('XSS')>",
+                        "is_active": 1
+                    }
+                ]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 200
+
+
+class TestAuthenticationSecurity:
+    """Test authentication security."""
+
+    def test_api_key_brute_force_protection(self):
+        """Test multiple failed auth attempts."""
+        # NOTE: This test documents a MISSING feature
+        # The service currently has no rate limiting
+
+        with app.test_client() as client:
+            payload = {"data_type": "warehouses_full", "records": []}
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            # Try 100 invalid API keys
+            for i in range(100):
+                response = client.post(
+                    '/api/ingest',
+                    headers={"X-API-Key": f"wrong_key_{i}"},
+                    json={"encrypted_payload": encrypted}
+                )
+                # All should return 401 (no rate limiting implemented)
+                assert response.status_code == 401
+
+            # Now try valid key - should still work (no IP ban)
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+            # Should work (no brute force protection)
+            assert response.status_code in [200, 500]
+
+    def test_empty_api_key(self):
+        """Test empty API key is rejected."""
+        with app.test_client() as client:
+            payload = {"data_type": "warehouses_full", "records": []}
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": ""},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 401
+
+    def test_api_key_with_special_characters(self):
+        """Test API key with special characters."""
+        with app.test_client() as client:
+            payload = {"data_type": "warehouses_full", "records": []}
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            special_keys = [
+                "key'with'quotes",
+                "key;with;semicolons",
+                "key--with--comments",
+                "key/*with*/comments"
+            ]
+
+            for key in special_keys:
+                response = client.post(
+                    '/api/ingest',
+                    headers={"X-API-Key": key},
+                    json={"encrypted_payload": encrypted}
+                )
+                # All should be rejected (not valid API keys)
+                assert response.status_code == 401
+
+
+class TestEncryptionSecurity:
+    """Test encryption security."""
+
+    def test_encryption_key_strength(self):
+        """Test encryption key is Fernet-compatible."""
+        # Fernet keys must be 32 bytes, base64-encoded
+        from cryptography.fernet import Fernet
+
+        # Should not raise exception
+        try:
+            test_cipher = Fernet(os.getenv("ENCRYPTION_KEY").encode('utf-8'))
+            assert True
+        except Exception:
+            pytest.fail("Encryption key is not Fernet-compatible")
+
+    def test_encryption_prevents_tampering(self):
+        """Test encrypted payload cannot be tampered with."""
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [{"warehouse_code": "TEST", "warehouse_name": "Test", "is_active": 1}]
+            }
+
+            # Encrypt
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            # Tamper with encrypted data
+            tampered = encrypted[:-5] + "XXXXX"
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": tampered}
+            )
+
+            # Should reject tampered data
+            assert response.status_code == 400
+            data = response.get_json()
+            assert 'Decryption failed' in data['error']
+
+    def test_different_encryption_keys_fail(self):
+        """Test payload encrypted with different key fails."""
+        with app.test_client() as client:
+            # Generate different key
+            wrong_key = Fernet.generate_key()
+            wrong_cipher = Fernet(wrong_key)
+
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [{"warehouse_code": "TEST", "warehouse_name": "Test", "is_active": 1}]
+            }
+
+            # Encrypt with wrong key
+            encrypted = wrong_cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should reject
+            assert response.status_code == 400
+
+    def test_padding_oracle_attack_prevention(self):
+        """Test Fernet is resistant to padding oracle attacks."""
+        # Fernet uses authenticated encryption (AES-128-CBC + HMAC)
+        # which is resistant to padding oracle attacks by design
+
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": []
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            # Try various padding manipulations
+            for _ in range(10):
+                # Truncate encrypted data
+                truncated = encrypted[:-1]
+                response = client.post(
+                    '/api/ingest',
+                    headers={"X-API-Key": os.getenv("API_KEY")},
+                    json={"encrypted_payload": truncated}
+                )
+                # Should reject without leaking padding information
+                assert response.status_code == 400
+
+
+class TestDosPrevention:
+    """Test Denial of Service (DoS) prevention."""
+
+    @patch('supabase_client.get_supabase_client')
+    def test_payload_size_limit(self, mock_db_client):
+        """Test extremely large payload handling."""
+        # NOTE: This test documents a MISSING feature
+        # The service currently has no payload size limit
+
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            # Create 10,000 records (~2MB payload)
+            records = [
+                {
+                    "warehouse_code": f"WH{i:06d}",
+                    "warehouse_name": f"Warehouse {i}" * 100,  # Large string
+                    "is_active": 1
+                }
+                for i in range(10000)
+            ]
+
+            payload = {
+                "data_type": "warehouses_full",
+                "records": records
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            # Should accept (no size limit implemented)
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Will likely timeout or fail on memory
+            assert response.status_code in [200, 500, 413, 503]
+
+    def test_nested_json_attack(self):
+        """Test deeply nested JSON (DoS via parsing)."""
+        with app.test_client() as client:
+            # Create deeply nested structure
+            nested = {"a": 1}
+            for _ in range(100):
+                nested = {"nested": nested}
+
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [],
+                "extra": nested
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should handle or reject gracefully
+            assert response.status_code in [200, 400, 500]
+
+
+class TestInformationDisclosure:
+    """Test prevention of information disclosure."""
+
+    def test_error_messages_dont_leak_data(self):
+        """Test error messages don't leak sensitive information."""
+        with app.test_client() as client:
+            # Send invalid encrypted payload
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": "invalid_base64!@#$%"}
+            )
+
+            assert response.status_code == 400
+            data = response.get_json()
+
+            # Error should be generic, not expose internals
+            assert 'Decryption failed' in data['error']
+            # Should not contain stack traces or system info
+            assert 'Traceback' not in str(data)
+            assert '/app.py' not in str(data)
+
+    def test_success_response_no_sensitive_data(self):
+        """Test success response doesn't leak sensitive data."""
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [{"warehouse_code": "SECRET", "warehouse_name": "Secret Data", "is_active": 1}]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Response should not contain decrypted data
+            data = response.get_json()
+            assert 'SECRET' not in str(data)
+            assert 'Secret Data' not in str(data)
+
+    def test_database_errors_not_leaked(self):
+        """Test database errors don't leak schema info."""
+        with patch('supabase_client.get_supabase_client') as mock_db_client:
+            mock_client = MagicMock()
+            mock_db_client.return_value = mock_client
+            mock_client.table.return_value.upsert.return_value.execute.side_effect = Exception(
+                "relation \"public.warehouses\" does not exist"
+            )
+
+            with app.test_client() as client:
+                payload = {
+                    "data_type": "warehouses_full",
+                    "records": [{"warehouse_code": "TEST", "warehouse_name": "Test", "is_active": 1}]
+                }
+
+                encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+                response = client.post(
+                    '/api/ingest',
+                    headers={"X-API-Key": os.getenv("API_KEY")},
+                    json={"encrypted_payload": encrypted}
+                )
+
+                # Should return generic error
+                assert response.status_code == 200
+                data = response.get_json()
+                assert data['records_failed'] > 0
+                # Should not leak database schema details in response
+                assert 'relation' not in str(data)
+                assert 'public' not in str(data)
+
+
+class TestInputValidationSecurity:
+    """Test input validation for security."""
+
+    @patch('supabase_client.get_supabase_client')
+    def test_null_byte_injection(self, mock_db_client):
+        """Test null byte injection."""
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [
+                    {
+                        "warehouse_code": "TEST\x00.exe",
+                        "warehouse_name": "Test",
+                        "is_active": 1
+                    }
+                ]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should handle or reject
+            assert response.status_code in [200, 400]
+
+    @patch('supabase_client.get_supabase_client')
+    def test_unicode_normalization_attack(self, mock_db_client):
+        """Test Unicode normalization attacks."""
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            # Use homoglyphs (visual look-alikes)
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [
+                    {
+                        "warehouse_code": "ＴＥＳＴ",  # Full-width characters
+                        "warehouse_name": "Test",
+                        "is_active": 1
+                    }
+                ]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should accept (Unicode is valid)
+            assert response.status_code == 200
+
+    @patch('supabase_client.get_supabase_client')
+    def test_path_traversal_in_fields(self, mock_db_client):
+        """Test path traversal in string fields."""
+        mock_client = MagicMock()
+        mock_db_client.return_value = mock_client
+        mock_client.table.return_value.upsert.return_value.execute.return_value = None
+
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [
+                    {
+                        "warehouse_code": "TEST",
+                        "warehouse_name": "../../../etc/passwd",
+                        "is_active": 1
+                    }
+                ]
+            }
+
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should accept (no path operations on strings)
+            assert response.status_code == 200
+
+
+class TestContentTypeSecurity:
+    """Test content-type handling security."""
+
+    def test_invalid_content_type(self):
+        """Test request with invalid content-type."""
+        with app.test_client() as client:
+            payload = {"encrypted_payload": "test"}
+
+            # Send with text/plain instead of application/json
+            response = client.post(
+                '/api/ingest',
+                headers={
+                    "X-API-Key": os.getenv("API_KEY"),
+                    "Content-Type": "text/plain"
+                },
+                data=json.dumps(payload)
+            )
+
+            # Should reject or handle gracefully
+            assert response.status_code in [400, 415]
+
+    def test_missing_content_type(self):
+        """Test request without content-type."""
+        with app.test_client() as client:
+            payload = {"encrypted_payload": "test"}
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                data=json.dumps(payload)
+            )
+
+            # Should handle
+            assert response.status_code in [200, 400, 415]
+
+
+class TestHeaderInjection:
+    """Test HTTP header injection prevention."""
+
+    def test_header_injection_via_api_key(self):
+        """Test header injection via X-API-Key."""
+        with app.test_client() as client:
+            payload = {"data_type": "warehouses_full", "records": []}
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            # Try to inject headers
+            response = client.post(
+                '/api/ingest',
+                headers={
+                    "X-API-Key": "test\r\nX-Injected-Header: malicious"
+                },
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should reject (invalid API key)
+            assert response.status_code == 401

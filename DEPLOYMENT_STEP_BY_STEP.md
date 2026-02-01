@@ -66,9 +66,9 @@ Add these variables:
 
 | Key | Value | Sync | Note |
 |-----|-------|------|------|
-| `API_KEY` | `BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM` | **No** | Authentication key for SAP Agent |
-| `ENCRYPTION_KEY` | `RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA=` | **No** | Fernet encryption key |
-| `DATABASE_URL` | `postgresql://postgres:FV3_SafePass2026!Migration@db.jgqegjvrphjsmdojqwyt.supabase.co:6543/postgres` | **No** | Supabase connection string |
+| `API_KEY` | `YOUR_API_KEY_HERE` | **No** | Authentication key for SAP Agent |
+| `ENCRYPTION_KEY` | `YOUR_ENCRYPTION_KEY_HERE` | **No** | Fernet encryption key |
+| `DATABASE_URL` | `postgresql://postgres:YOUR_PASSWORD_HERE!Migration@db.jgqegjvrphjsmdojqwyt.supabase.co:6543/postgres` | **No** | Supabase connection string |
 | `LOG_LEVEL` | `INFO` | Yes | Logging level |
 | `PORT` | `8080` | Yes | Application port |
 
@@ -140,8 +140,8 @@ from cryptography.fernet import Fernet
 
 # Configuration
 ENDPOINT = "https://forecast-ingestion.onrender.com/api/ingest"
-API_KEY = "BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM"
-ENCRYPTION_KEY = "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA="
+API_KEY = "YOUR_API_KEY_HERE"
+ENCRYPTION_KEY = "YOUR_ENCRYPTION_KEY_HERE"
 
 # Create test data
 test_payload = {
@@ -203,7 +203,7 @@ python test_render_deployment.py
 
 **Option 1: Via psql:**
 ```bash
-psql "postgresql://postgres:FV3_SafePass2026!Migration@db.jgqegjvrphjsmdojqwyt.supabase.co:6543/postgres" -c "SELECT * FROM warehouses WHERE warehouse_code = 'DEPLOY01';"
+psql "postgresql://postgres:YOUR_PASSWORD_HERE!Migration@db.jgqegjvrphjsmdojqwyt.supabase.co:6543/postgres" -c "SELECT * FROM warehouses WHERE warehouse_code = 'DEPLOY01';"
 ```
 
 **Option 2: Via Supabase Dashboard:**
@@ -229,8 +229,8 @@ import json
 from cryptography.fernet import Fernet
 
 ENDPOINT = "https://forecast-ingestion.onrender.com/api/ingest"
-API_KEY = "BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM"
-ENCRYPTION_KEY = "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA="
+API_KEY = "YOUR_API_KEY_HERE"
+ENCRYPTION_KEY = "YOUR_ENCRYPTION_KEY_HERE"
 cipher = Fernet(ENCRYPTION_KEY.encode('utf-8'))
 
 test_cases = [
@@ -417,7 +417,7 @@ curl https://forecast-ingestion.onrender.com/health -v
 
 **Solutions:**
 1. Verify `API_KEY` environment variable is set correctly in Render
-2. Check `X-API-Key` header matches exactly: `BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM`
+2. Check `X-API-Key` header matches exactly: `YOUR_API_KEY_HERE`
 3. Ensure no extra spaces in API key
 
 **Debug:**
@@ -425,7 +425,7 @@ curl https://forecast-ingestion.onrender.com/health -v
 import requests
 response = requests.post(
     "https://forecast-ingestion.onrender.com/api/ingest",
-    headers={"X-API-Key": "BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM"}
+    headers={"X-API-Key": "YOUR_API_KEY_HERE"}
 )
 print(response.status_code)
 ```
@@ -448,7 +448,7 @@ print(response.status_code)
 from cryptography.fernet import Fernet
 import json
 
-ENCRYPTION_KEY = "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA="
+ENCRYPTION_KEY = "YOUR_ENCRYPTION_KEY_HERE"
 cipher = Fernet(ENCRYPTION_KEY.encode('utf-8'))
 
 # Test encryption/decryption
@@ -470,7 +470,7 @@ print("Decryption working:", json.loads(decrypted.decode('utf-8')))
 1. Verify `DATABASE_URL` is correct in Render environment
 2. Test Supabase connection locally:
    ```bash
-   psql "postgresql://postgres:FV3_SafePass2026!Migration@db.jgqegjvrphjsmdojqwyt.supabase.co:6543/postgres" -c "SELECT 1"
+   psql "postgresql://postgres:YOUR_PASSWORD_HERE!Migration@db.jgqegjvrphjsmdojqwyt.supabase.co:6543/postgres" -c "SELECT 1"
    ```
 3. Check Supabase dashboard for service status
 4. Ensure Supabase allows connections from Render IPs
@@ -502,8 +502,8 @@ print("Decryption working:", json.loads(decrypted.decode('utf-8')))
 ```python
 # SAP Agent configuration
 INGESTION_ENDPOINT = "https://forecast-ingestion.onrender.com/api/ingest"
-API_KEY = "BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM"
-ENCRYPTION_KEY = "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA="
+API_KEY = "YOUR_API_KEY_HERE"
+ENCRYPTION_KEY = "YOUR_ENCRYPTION_KEY_HERE"
 ```
 
 **Request Format:**

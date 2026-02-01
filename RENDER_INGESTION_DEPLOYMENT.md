@@ -27,8 +27,8 @@ Complete step-by-step guide for deploying the Render Ingestion Service to produc
 ### Required Information
 
 - [ ] Supabase DATABASE_URL
-- [ ] API Key: `BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM`
-- [ ] Encryption Key: `RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA=`
+- [ ] API Key: `YOUR_API_KEY_HERE`
+- [ ] Encryption Key: `YOUR_ENCRYPTION_KEY_HERE`
 
 ### Local Tools
 
@@ -68,8 +68,8 @@ cp .env.example .env
 
 Edit .env with your values:
 ```env
-API_KEY=BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM
-ENCRYPTION_KEY=RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA=
+API_KEY=YOUR_API_KEY_HERE
+ENCRYPTION_KEY=YOUR_ENCRYPTION_KEY_HERE
 DATABASE_URL=postgresql://postgres:[YOUR-PASSWORD]@db.[YOUR-PROJECT].supabase.co:5432/postgres
 LOG_LEVEL=INFO
 PORT=8080
@@ -167,8 +167,8 @@ import json
 from cryptography.fernet import Fernet
 
 ENDPOINT = "http://localhost:8080/api/ingest"
-API_KEY = "BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM"
-ENCRYPTION_KEY = "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA="
+API_KEY = "YOUR_API_KEY_HERE"
+ENCRYPTION_KEY = "YOUR_ENCRYPTION_KEY_HERE"
 
 test_payload = {
     "data_type": "warehouses_full",
@@ -339,8 +339,8 @@ Click **Advanced** → **Add Environment Variable**:
 
 | Key | Value | Sync |
 |-----|-------|------|
-| `API_KEY` | `BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM` | **No** |
-| `ENCRYPTION_KEY` | `RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA=` | **No** |
+| `API_KEY` | `YOUR_API_KEY_HERE` | **No** |
+| `ENCRYPTION_KEY` | `YOUR_ENCRYPTION_KEY_HERE` | **No** |
 | `DATABASE_URL` | Your Supabase connection string | **No** |
 | `LOG_LEVEL` | `INFO` | Yes |
 | `PORT` | `8080` | Yes |
@@ -437,8 +437,8 @@ import json
 from cryptography.fernet import Fernet
 
 ENDPOINT = "https://YOUR-SERVICE.onrender.com/api/ingest"
-API_KEY = "BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM"
-ENCRYPTION_KEY = "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA="
+API_KEY = "YOUR_API_KEY_HERE"
+ENCRYPTION_KEY = "YOUR_ENCRYPTION_KEY_HERE"
 
 cipher = Fernet(ENCRYPTION_KEY.encode('utf-8'))
 
@@ -621,7 +621,7 @@ Monitor Supabase:
 **Solutions:**
 1. Verify X-API-Key header is being sent
 2. Check API_KEY environment variable in Render
-3. Ensure key matches exactly: `BzYlIYXKMxzN49K28NBSDP1jK0FcvTQsuXIR5p0XgeM`
+3. Ensure key matches exactly: `YOUR_API_KEY_HERE`
 
 ### Issue 5: Database Connection Failed
 

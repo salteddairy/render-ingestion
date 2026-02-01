@@ -1,23 +1,38 @@
 """
-Rate Limiting Middleware for Flask APIs (Standalone Version)
+Rate Limiting Middleware for Flask APIs (Enhanced Version)
 
 Limits request rate by IP address and API key to prevent abuse and DoS attacks.
 
 Features:
 - In-memory request tracking (suitable for single-instance deployments)
-- Configurable limits per endpoint
+- Configurable limits per endpoint via environment variables
 - Standard rate limit headers (X-RateLimit-*)
 - Support for both IP-based and API key-based limiting
 - Thread-safe implementation using locks
+- Environment variable configuration
+- Enhanced error handling and logging
 
-For production with multiple instances, use Redis or database-backed storage.
+For production with multiple instances, configure REDIS_URL environment variable.
+
+Environment Variables:
+    RATE_LIMIT_ENABLED: Enable/disable rate limiting (default: true)
+    RATE_LIMIT_STORAGE: Storage backend (memory or redis, default: memory)
+    REDIS_URL: Redis URL for distributed rate limiting (default: None)
+    RATE_LIMIT_DEFAULT: Default rate limit (default: 100 per hour)
+
+Configuration Examples:
+    # Environment variables
+    RATE_LIMIT_ENABLED=true
+    RATE_LIMIT_STORAGE=memory
+    RATE_LIMIT_DEFAULT=100:3600  # 100 requests per hour
 """
 import time
 import logging
+import os
 from functools import wraps
 from collections import defaultdict
 from threading import Lock
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 
 from flask import request, jsonify, g
 
@@ -26,16 +41,43 @@ logger = logging.getLogger(__name__)
 
 class RateLimiter:
     """
-    Thread-safe rate limiter using in-memory storage.
+    Thread-safe rate limiter using in-memory or Redis storage.
 
     Tracks requests by key (IP address or API key) and enforces limits
     within a sliding time window.
+
+    Args:
+        storage_backend: 'memory' or 'redis' (default: from env or 'memory')
+        redis_url: Redis URL for distributed rate limiting (default: from env)
     """
 
-    def __init__(self):
-        # In-memory store: {key: [timestamp1, timestamp2, ...]}
-        self.requests: Dict[str, list] = defaultdict(list)
-        self.lock = Lock()
+    def __init__(self, storage_backend: Optional[str] = None, redis_url: Optional[str] = None):
+        # Determine storage backend from environment or parameter
+        self.storage_backend = storage_backend or os.environ.get('RATE_LIMIT_STORAGE', 'memory')
+        self.redis_url = redis_url or os.environ.get('REDIS_URL')
+        self.redis_client = None
+
+        # Initialize storage backend
+        if self.storage_backend == 'redis':
+            try:
+                import redis
+                self.redis_client = redis.from_url(self.redis_url, decode_responses=True)
+                logger.info("✓ Rate limiter using Redis storage")
+            except ImportError:
+                logger.warning("Redis not available, falling back to memory storage")
+                self.storage_backend = 'memory'
+            except Exception as e:
+                logger.error(f"Redis connection failed: {e}, falling back to memory")
+                self.storage_backend = 'memory'
+
+        if self.storage_backend == 'memory':
+            # In-memory store: {key: [timestamp1, timestamp2, ...]}
+            self.requests: Dict[str, list] = defaultdict(list)
+            self.lock = Lock()
+            logger.info("✓ Rate limiter using in-memory storage")
+
+        # Check if rate limiting is enabled
+        self.enabled = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
 
     def is_allowed(self, key: str, limit: int, period: int) -> bool:
         """
@@ -49,6 +91,17 @@ class RateLimiter:
         Returns:
             bool: True if request is allowed, False if limit exceeded
         """
+        # If rate limiting is disabled, always allow
+        if not self.enabled:
+            return True
+
+        if self.storage_backend == 'redis' and self.redis_client:
+            return self._is_allowed_redis(key, limit, period)
+        else:
+            return self._is_allowed_memory(key, limit, period)
+
+    def _is_allowed_memory(self, key: str, limit: int, period: int) -> bool:
+        """Check rate limit using in-memory storage."""
         with self.lock:
             now = time.time()
 
@@ -65,6 +118,37 @@ class RateLimiter:
             else:
                 return False
 
+    def _is_allowed_redis(self, key: str, limit: int, period: int) -> bool:
+        """Check rate limit using Redis storage with sliding window."""
+        try:
+            now = time.time()
+            pipe = self.redis_client.pipeline()
+
+            # Redis key for this rate limit
+            redis_key = f"rate_limit:{key}"
+
+            # Remove old entries outside the window
+            pipeline_min = now - period
+            pipe.zremrangebyscore(redis_key, 0, pipeline_min)
+
+            # Count current requests
+            pipe.zcard(redis_key)
+
+            # Add current request
+            pipe.zadd(redis_key, {str(now): now})
+
+            # Set expiry
+            pipe.expire(redis_key, int(period))
+
+            results = pipe.execute()
+            current_count = results[1]
+
+            return current_count < limit
+
+        except Exception as e:
+            logger.error(f"Redis rate limit check failed: {e}, allowing request")
+            return True  # Fail open
+
     def get_request_count(self, key: str, period: int) -> int:
         """
         Get current request count for a key within the period.
@@ -76,6 +160,16 @@ class RateLimiter:
         Returns:
             int: Number of requests made within the period
         """
+        if not self.enabled:
+            return 0
+
+        if self.storage_backend == 'redis' and self.redis_client:
+            return self._get_request_count_redis(key, period)
+        else:
+            return self._get_request_count_memory(key, period)
+
+    def _get_request_count_memory(self, key: str, period: int) -> int:
+        """Get request count using in-memory storage."""
         with self.lock:
             now = time.time()
 
@@ -86,6 +180,20 @@ class RateLimiter:
             ]
 
             return len(self.requests[key])
+
+    def _get_request_count_redis(self, key: str, period: int) -> int:
+        """Get request count using Redis storage."""
+        try:
+            redis_key = f"rate_limit:{key}"
+            now = time.time()
+            pipeline_min = now - period
+
+            # Count requests within window
+            count = self.redis_client.zcount(redis_key, pipeline_min, now)
+            return int(count)
+        except Exception as e:
+            logger.error(f"Redis get_request_count failed: {e}")
+            return 0
 
     def get_retry_after(self, key: str, period: int) -> int:
         """
@@ -98,6 +206,16 @@ class RateLimiter:
         Returns:
             int: Seconds until next request allowed (0 if allowed now)
         """
+        if not self.enabled:
+            return 0
+
+        if self.storage_backend == 'redis' and self.redis_client:
+            return self._get_retry_after_redis(key, period)
+        else:
+            return self._get_retry_after_memory(key, period)
+
+    def _get_retry_after_memory(self, key: str, period: int) -> int:
+        """Get retry after using in-memory storage."""
         with self.lock:
             if not self.requests[key]:
                 return 0
@@ -116,6 +234,25 @@ class RateLimiter:
             retry_after = int(oldest_valid + period - now)
             return max(0, retry_after)
 
+    def _get_retry_after_redis(self, key: str, period: int) -> int:
+        """Get retry after using Redis storage."""
+        try:
+            redis_key = f"rate_limit:{key}"
+            now = time.time()
+
+            # Get oldest request in window
+            results = self.redis_client.zrange(redis_key, 0, 0, withscores=True)
+
+            if not results:
+                return 0
+
+            oldest_score = results[0][1]
+            retry_after = int(oldest_score + period - now)
+            return max(0, retry_after)
+        except Exception as e:
+            logger.error(f"Redis get_retry_after failed: {e}")
+            return 0
+
     def get_reset_time(self, key: str, period: int) -> int:
         """
         Get Unix timestamp when rate limit window resets.
@@ -127,6 +264,16 @@ class RateLimiter:
         Returns:
             int: Unix timestamp of window reset
         """
+        if not self.enabled:
+            return int(time.time())
+
+        if self.storage_backend == 'redis' and self.redis_client:
+            return self._get_reset_time_redis(key, period)
+        else:
+            return self._get_reset_time_memory(key, period)
+
+    def _get_reset_time_memory(self, key: str, period: int) -> int:
+        """Get reset time using in-memory storage."""
         with self.lock:
             if not self.requests[key]:
                 return int(time.time() + period)
@@ -134,6 +281,24 @@ class RateLimiter:
             now = time.time()
             oldest = min(self.requests[key])
             return int(oldest + period)
+
+    def _get_reset_time_redis(self, key: str, period: int) -> int:
+        """Get reset time using Redis storage."""
+        try:
+            redis_key = f"rate_limit:{key}"
+            now = time.time()
+
+            # Get oldest request
+            results = self.redis_client.zrange(redis_key, 0, 0, withscores=True)
+
+            if not results:
+                return int(now + period)
+
+            oldest_score = results[0][1]
+            return int(oldest_score + period)
+        except Exception as e:
+            logger.error(f"Redis get_reset_time failed: {e}")
+            return int(time.time() + period)
 
 
 # Global rate limiter instance

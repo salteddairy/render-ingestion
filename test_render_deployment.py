@@ -26,7 +26,7 @@ RENDER_URL = os.environ.get("RENDER_URL", "https://forecast-ingestion.onrender.c
 API_KEY = os.environ.get("INGESTION_API_KEY", "")
 if not API_KEY:
     raise ValueError("INGESTION_API_KEY environment variable not set")
-ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "RLeqML3xLZBrghpFDBCs7q9aqcLr4FEoGxtBCL3DFfA=")
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "YOUR_ENCRYPTION_KEY_HERE")
 
 # Colors for terminal output
 GREEN = '\033[92m'

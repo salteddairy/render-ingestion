@@ -1,0 +1,689 @@
+"""
+Unit Tests for Render Ingestion Service
+Tests individual components and functions in isolation
+"""
+
+import pytest
+import json
+import os
+from datetime import datetime, timezone
+from cryptography.fernet import Fernet
+from unittest.mock import Mock, patch, MagicMock
+
+# Set environment variables before importing app
+os.environ["API_KEY"] = "test_api_key_1234567890"
+os.environ["ENCRYPTION_KEY"] = "test_encryption_key_32_characters_long!"
+os.environ["DATABASE_URL"] = "postgresql://test:test@localhost:5432/test"
+os.environ["LOG_LEVEL"] = "ERROR"
+
+from app import app, cipher, DATA_TYPE_HANDLERS
+
+
+class TestHealthEndpoint:
+    """Test health check endpoint."""
+
+    def test_health_returns_200(self):
+        """Health check returns 200 status."""
+        with app.test_client() as client:
+            response = client.get('/health')
+            assert response.status_code == 200
+
+    def test_health_response_structure(self):
+        """Health check has correct response structure."""
+        with app.test_client() as client:
+            response = client.get('/health')
+            data = response.get_json()
+
+            assert data['status'] == 'healthy'
+            assert data['service'] == 'forecast-ingestion'
+            assert 'timestamp' in data
+            assert 'version' in data
+            assert data['version'] == '1.0.0'
+
+
+class TestAuthentication:
+    """Test API key authentication."""
+
+    def test_valid_api_key_accepted(self):
+        """Valid API key is accepted."""
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [{"warehouse_code": "TEST", "warehouse_name": "Test", "is_active": 1}]
+            }
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should pass auth (may fail on DB)
+            assert response.status_code in [200, 500]
+
+    def test_invalid_api_key_rejected(self):
+        """Invalid API key returns 401."""
+        with app.test_client() as client:
+            payload = {"data_type": "warehouses_full", "records": []}
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": "wrong_key"},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 401
+            data = response.get_json()
+            assert data['success'] is False
+            assert 'Unauthorized' in data['error']
+
+    def test_missing_api_key_rejected(self):
+        """Missing API key returns 401."""
+        with app.test_client() as client:
+            payload = {"data_type": "warehouses_full", "records": []}
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 401
+
+    def test_empty_api_key_rejected(self):
+        """Empty API key returns 401."""
+        with app.test_client() as client:
+            payload = {"data_type": "warehouses_full", "records": []}
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": ""},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 401
+
+
+class TestDecryption:
+    """Test payload decryption functionality."""
+
+    def test_valid_encrypted_payload(self):
+        """Valid encrypted payload is decrypted correctly."""
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [{"warehouse_code": "TEST", "warehouse_name": "Test", "is_active": 1}]
+            }
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Decryption should succeed
+            assert response.status_code in [200, 500]
+
+    def test_corrupted_payload_returns_400(self):
+        """Corrupted payload returns 400."""
+        with app.test_client() as client:
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": "not_valid_fernet_token"}
+            )
+
+            assert response.status_code == 400
+            data = response.get_json()
+            assert data['success'] is False
+            assert 'Decryption failed' in data['error']
+
+    def test_missing_encrypted_payload_returns_400(self):
+        """Missing encrypted_payload field returns 400."""
+        with app.test_client() as client:
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={}
+            )
+
+            assert response.status_code == 400
+            data = response.get_json()
+            assert data['success'] is False
+            assert 'Missing encrypted_payload' in data['error']
+
+    def test_wrong_encryption_key_fails(self):
+        """Payload encrypted with different key fails."""
+        with app.test_client() as client:
+            # Use different key
+            wrong_cipher = Fernet(Fernet.generate_key())
+            payload = {"data_type": "warehouses_full", "records": []}
+            encrypted = wrong_cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 400
+
+
+class TestInputValidation:
+    """Test input validation."""
+
+    def test_missing_request_body_returns_400(self):
+        """Missing request body returns 400."""
+        with app.test_client() as client:
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")}
+            )
+
+            assert response.status_code == 400
+            data = response.get_json()
+            assert 'Missing request body' in data['error']
+
+    def test_missing_data_type_returns_400(self):
+        """Missing data_type returns 400."""
+        with app.test_client() as client:
+            payload = {"records": []}
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 400
+            data = response.get_json()
+            assert 'Missing data_type' in data['error']
+
+    def test_empty_records_accepted(self):
+        """Empty records list is accepted."""
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": []
+            }
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 200
+            data = response.get_json()
+            assert data['success'] is True
+            assert data['records_count'] == 0
+
+    def test_unknown_data_type_returns_400(self):
+        """Unknown data_type returns 400."""
+        with app.test_client() as client:
+            payload = {
+                "data_type": "unknown_type",
+                "records": []
+            }
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 400
+            data = response.get_json()
+            assert 'Unknown data_type' in data['error']
+
+    def test_malformed_json_returns_400(self):
+        """Malformed JSON in encrypted payload returns 400."""
+        with app.test_client() as client:
+            # Encrypt invalid JSON
+            encrypted = cipher.encrypt(b"not valid json").decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code == 400
+
+
+class TestDataTypeValidation:
+    """Test all 8 data types are supported."""
+
+    def test_all_data_types_in_handler_mapping(self):
+        """All 8 data types have handler mappings."""
+        expected_types = [
+            "warehouses_full",
+            "vendors_full",
+            "items_full",
+            "inventory_current_full",
+            "sales_orders_incremental",
+            "purchase_orders_incremental",
+            "costs_incremental",
+            "pricing_full"
+        ]
+
+        for data_type in expected_types:
+            assert data_type in DATA_TYPE_HANDLERS
+            assert data_type in DATA_TYPE_HANDLERS
+
+
+class TestRequiredFieldValidation:
+    """Test required field validation for each data type."""
+
+    def create_test_payload(self, data_type, record):
+        """Helper to create test payload."""
+        return {
+            "data_type": data_type,
+            "records": [record]
+        }
+
+    def test_warehouses_missing_required_field(self):
+        """Missing warehouse_code is handled."""
+        with app.test_client() as client:
+            payload = self.create_test_payload(
+                "warehouses_full",
+                {"warehouse_name": "Test", "is_active": 1}  # Missing warehouse_code
+            )
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should succeed but process 0 records
+            assert response.status_code in [200, 500]
+
+    def test_vendors_missing_required_field(self):
+        """Missing vendor_code is handled."""
+        with app.test_client() as client:
+            payload = self.create_test_payload(
+                "vendors_full",
+                {"vendor_name": "Test"}  # Missing vendor_code
+            )
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code in [200, 500]
+
+    def test_items_missing_required_field(self):
+        """Missing item_code is handled."""
+        with app.test_client() as client:
+            payload = self.create_test_payload(
+                "items_full",
+                {"item_name": "Test"}  # Missing item_code
+            )
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            assert response.status_code in [200, 500]
+
+
+class TestBatchMetadataHandling:
+    """Test _batch_metadata field is properly handled."""
+
+    def test_batch_metadata_field_ignored(self):
+        """_batch_metadata field is ignored during processing."""
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [
+                    {
+                        "warehouse_code": "TEST",
+                        "warehouse_name": "Test",
+                        "is_active": 1,
+                        "_batch_metadata": {
+                            "batch_id": "test-batch-001",
+                            "query_id": "warehouses_full",
+                            "query_name": "Test",
+                            "chunk_index": 0,
+                            "total_chunks": 1,
+                            "extraction_timestamp": datetime.now(timezone.utc).isoformat(),
+                            "source": "SAP B1",
+                            "destination": "render"
+                        }
+                    }
+                ]
+            }
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should handle metadata gracefully
+            assert response.status_code in [200, 500]
+
+
+class TestErrorHandling:
+    """Test error handling."""
+
+    def test_404_endpoint(self):
+        """Non-existent endpoint returns 404."""
+        with app.test_client() as client:
+            response = client.get('/nonexistent')
+            assert response.status_code == 404
+
+            data = response.get_json()
+            assert data['success'] is False
+            assert 'not found' in data['error'].lower()
+
+    def test_500_error_handled(self):
+        """Internal server errors are caught."""
+        with patch('app.DATA_HANDLERS') as mock_handlers:
+            # Make handler raise exception
+            mock_handlers.get.return_value.side_effect = Exception("Test error")
+
+            with app.test_client() as client:
+                payload = {
+                    "data_type": "warehouses_full",
+                    "records": [{"warehouse_code": "TEST", "warehouse_name": "Test", "is_active": 1}]
+                }
+                encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+                response = client.post(
+                    '/api/ingest',
+                    headers={"X-API-Key": os.getenv("API_KEY")},
+                    json={"encrypted_payload": encrypted}
+                )
+
+                assert response.status_code == 500
+                data = response.get_json()
+                assert data['success'] is False
+
+
+class TestLargePayloads:
+    """Test handling of large payloads."""
+
+    def test_large_records_array(self):
+        """Test with 1000 records."""
+        with app.test_client() as client:
+            records = [
+                {
+                    "warehouse_code": f"WH{i:04d}",
+                    "warehouse_name": f"Warehouse {i}",
+                    "is_active": 1
+                }
+                for i in range(1000)
+            ]
+
+            payload = {
+                "data_type": "warehouses_full",
+                "records": records
+            }
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should handle large payload (may fail on DB)
+            assert response.status_code in [200, 500]
+
+    def test_very_large_single_record(self):
+        """Test with very large field values."""
+        with app.test_client() as client:
+            payload = {
+                "data_type": "warehouses_full",
+                "records": [
+                    {
+                        "warehouse_code": "TEST",
+                        "warehouse_name": "A" * 10000,  # 10KB string
+                        "is_active": 1
+                    }
+                ]
+            }
+            encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+            response = client.post(
+                '/api/ingest',
+                headers={"X-API-Key": os.getenv("API_KEY")},
+                json={"encrypted_payload": encrypted}
+            )
+
+            # Should handle large field values
+            assert response.status_code in [200, 500]
+
+
+class TestConcurrentRequests:
+    """Test concurrent request handling."""
+
+    def test_concurrent_requests(self):
+        """Test 10 simultaneous requests."""
+        import threading
+
+        def make_request():
+            with app.test_client() as client:
+                payload = {
+                    "data_type": "warehouses_full",
+                    "records": [{"warehouse_code": "TEST", "warehouse_name": "Test", "is_active": 1}]
+                }
+                encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+
+                response = client.post(
+                    '/api/ingest',
+                    headers={"X-API-Key": os.getenv("API_KEY")},
+                    json={"encrypted_payload": encrypted}
+                )
+                return response.status_code
+
+        threads = []
+        results = []
+
+        def worker():
+            result = make_request()
+            results.append(result)
+
+        for _ in range(10):
+            t = threading.Thread(target=worker)
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        # All requests should complete
+        assert len(results) == 10
+        # All should return valid status codes
+        for status in results:
+            assert status in [200, 401, 500]
+
+
+class TestDataTypes:
+    """Test each data type individually."""
+
+    @pytest.fixture
+    def sample_warehouses(self):
+        return {
+            "data_type": "warehouses_full",
+            "records": [{"warehouse_code": "01", "warehouse_name": "Main", "is_active": 1}]
+        }
+
+    @pytest.fixture
+    def sample_vendors(self):
+        return {
+            "data_type": "vendors_full",
+            "records": [{
+                "vendor_code": "V001",
+                "vendor_name": "Acme",
+                "contact_person": "John",
+                "phone": "555-1234",
+                "email": "john@acme.com",
+                "is_active": 1
+            }]
+        }
+
+    @pytest.fixture
+    def sample_items(self):
+        return {
+            "data_type": "items_full",
+            "records": [{"item_code": "A001", "item_name": "Widget", "item_group": "Finished", "is_active": 1}]
+        }
+
+    @pytest.fixture
+    def sample_inventory(self):
+        return {
+            "data_type": "inventory_current_full",
+            "records": [{"item_code": "A001", "warehouse_code": "01", "quantity": 100.0, "unit_price": 25.50}]
+        }
+
+    @pytest.fixture
+    def sample_sales_orders(self):
+        return {
+            "data_type": "sales_orders_incremental",
+            "records": [{
+                "order_id": 12345,
+                "order_date": "2025-01-27T00:00:00",
+                "customer_code": "C001",
+                "item_code": "A001",
+                "quantity": 10,
+                "unit_price": 25.50,
+                "line_total": 255.00
+            }]
+        }
+
+    @pytest.fixture
+    def sample_purchase_orders(self):
+        return {
+            "data_type": "purchase_orders_incremental",
+            "records": [{
+                "order_id": 67890,
+                "order_date": "2025-01-27T00:00:00",
+                "vendor_code": "V001",
+                "item_code": "A001",
+                "quantity": 100,
+                "unit_price": 15.00,
+                "line_total": 1500.00
+            }]
+        }
+
+    @pytest.fixture
+    def sample_costs(self):
+        return {
+            "data_type": "costs_incremental",
+            "records": [{
+                "item_code": "A001",
+                "avg_cost": 18.50,
+                "last_cost": 19.00,
+                "cost_date": "2025-01-27"
+            }]
+        }
+
+    @pytest.fixture
+    def sample_pricing(self):
+        return {
+            "data_type": "pricing_full",
+            "records": [{
+                "item_code": "A001",
+                "price_list": "1",
+                "price": 25.50,
+                "currency": "USD"
+            }]
+        }
+
+    def test_warehouses_full(self, client, sample_warehouses):
+        """Test warehouses_full data type."""
+        encrypted = cipher.encrypt(json.dumps(sample_warehouses).encode()).decode()
+        response = client.post(
+            '/api/ingest',
+            headers={"X-API-Key": os.getenv("API_KEY")},
+            json={"encrypted_payload": encrypted}
+        )
+        assert response.status_code in [200, 500]
+
+    def test_vendors_full(self, client, sample_vendors):
+        """Test vendors_full data type."""
+        encrypted = cipher.encrypt(json.dumps(sample_vendors).encode()).decode()
+        response = client.post(
+            '/api/ingest',
+            headers={"X-API-Key": os.getenv("API_KEY")},
+            json={"encrypted_payload": encrypted}
+        )
+        assert response.status_code in [200, 500]
+
+    def test_items_full(self, client, sample_items):
+        """Test items_full data type."""
+        encrypted = cipher.encrypt(json.dumps(sample_items).encode()).decode()
+        response = client.post(
+            '/api/ingest',
+            headers={"X-API-Key": os.getenv("API_KEY")},
+            json={"encrypted_payload": encrypted}
+        )
+        assert response.status_code in [200, 500]
+
+    def test_inventory_current_full(self, client, sample_inventory):
+        """Test inventory_current_full data type."""
+        encrypted = cipher.encrypt(json.dumps(sample_inventory).encode()).decode()
+        response = client.post(
+            '/api/ingest',
+            headers={"X-API-Key": os.getenv("API_KEY")},
+            json={"encrypted_payload": encrypted}
+        )
+        assert response.status_code in [200, 500]
+
+    def test_sales_orders_incremental(self, client, sample_sales_orders):
+        """Test sales_orders_incremental data type."""
+        encrypted = cipher.encrypt(json.dumps(sample_sales_orders).encode()).decode()
+        response = client.post(
+            '/api/ingest',
+            headers={"X-API-Key": os.getenv("API_KEY")},
+            json={"encrypted_payload": encrypted}
+        )
+        assert response.status_code in [200, 500]
+
+    def test_purchase_orders_incremental(self, client, sample_purchase_orders):
+        """Test purchase_orders_incremental data type."""
+        encrypted = cipher.encrypt(json.dumps(sample_purchase_orders).encode()).decode()
+        response = client.post(
+            '/api/ingest',
+            headers={"X-API-Key": os.getenv("API_KEY")},
+            json={"encrypted_payload": encrypted}
+        )
+        assert response.status_code in [200, 500]
+
+    def test_costs_incremental(self, client, sample_costs):
+        """Test costs_incremental data type."""
+        encrypted = cipher.encrypt(json.dumps(sample_costs).encode()).decode()
+        response = client.post(
+            '/api/ingest',
+            headers={"X-API-Key": os.getenv("API_KEY")},
+            json={"encrypted_payload": encrypted}
+        )
+        assert response.status_code in [200, 500]
+
+    def test_pricing_full(self, client, sample_pricing):
+        """Test pricing_full data type."""
+        encrypted = cipher.encrypt(json.dumps(sample_pricing).encode()).decode()
+        response = client.post(
+            '/api/ingest',
+            headers={"X-API-Key": os.getenv("API_KEY")},
+            json={"encrypted_payload": encrypted}
+        )
+        assert response.status_code in [200, 500]
