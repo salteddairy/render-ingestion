@@ -6,6 +6,20 @@ Processes and validates records before storing in Supabase
 import logging
 from typing import Dict, List, Any, Optional, Set
 from datetime import datetime
+import sys
+import os
+
+# Ensure transaction_manager is available before importing supabase_client
+current_dir = os.path.dirname(os.path.abspath(__file__))
+tm_path = os.path.join(current_dir, 'transaction_manager.py')
+
+if 'transaction_manager' not in sys.modules:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('transaction_manager', tm_path)
+    tm_module = importlib.util.module_from_spec(spec)
+    sys.modules['transaction_manager'] = tm_module
+    spec.loader.exec_module(tm_module)
+
 from supabase_client import (
     get_supabase_client,
     upsert_warehouses,
