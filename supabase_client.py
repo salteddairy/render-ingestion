@@ -97,8 +97,11 @@ def upsert_records(
             processed += 1
             logger.debug(f"Successfully upserted record to {table_name}")
         except Exception as e:
+            # Log the error AND include the record details for debugging
             logger.error(f"Failed to upsert record to {table_name}: {str(e)}")
-            failed += 1
+            logger.error(f"Record details: {record}")
+            # Re-raise the exception so it propagates to the API response
+            raise
 
     return {'processed': processed, 'failed': failed}
 
