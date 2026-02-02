@@ -72,13 +72,7 @@ def upsert_records(
     retry_delay: float = 1.0
 ) -> Dict[str, int]:
     """
-    Upsert records to Supabase table with retry logic and circuit breaker.
-
-    Enhanced with:
-    - Exponential backoff with jitter
-    - Circuit breaker for cascading failure prevention
-    - Comprehensive error handling
-    - Detailed logging
+    Upsert records to Supabase table.
 
     Args:
         table_name: Name of the Supabase table
@@ -89,40 +83,21 @@ def upsert_records(
     Returns:
         Dictionary with 'processed' and 'failed' counts
     """
-    from src.retry_utils import retry_with_backoff, RETRY_DATABASE
-    from src.circuit_breaker import ingestion_breaker, CircuitBreakerError
-
     if not records:
         return {'processed': 0, 'failed': 0}
 
     processed = 0
     failed = 0
+    client = get_supabase_client()
 
     for record in records:
         try:
-            @retry_with_backoff(
-                exceptions=(Exception,),
-                config=RETRY_DATABASE
-            )
-            @ingestion_breaker.call
-            def _upsert_with_retry():
-                client = get_supabase_client()
-                # Perform upsert
-                client.table(table_name).upsert(record).execute()
-                return True
-
-            _upsert_with_retry()
+            # Perform upsert
+            client.table(table_name).upsert(record).execute()
             processed += 1
             logger.debug(f"Successfully upserted record to {table_name}")
-
-        except CircuitBreakerError:
-            logger.error(f"Circuit breaker is open for ingestion operations")
-            failed += 1
-            # Break circuit is open, no point continuing
-            break
-
         except Exception as e:
-            logger.error(f"Failed to upsert record to {table_name} after all retries: {str(e)}")
+            logger.error(f"Failed to upsert record to {table_name}: {str(e)}")
             failed += 1
 
     return {'processed': processed, 'failed': failed}
@@ -154,90 +129,45 @@ def upsert_records_batch(
 
     def batch_operation(batch_records: List[Dict[str, Any]]) -> Dict[str, int]:
         """Process a batch of records."""
-        from src.retry_utils import retry_with_backoff, RETRY_DATABASE
-        from src.circuit_breaker import ingestion_breaker, CircuitBreakerError
-
         processed = 0
         failed = 0
+        client = get_supabase_client()
 
         for record in batch_records:
             try:
-                @retry_with_backoff(
-                    exceptions=(Exception,),
-                    config=RETRY_DATABASE
-                )
-                @ingestion_breaker.call
-                def _upsert_with_retry():
-                    client = get_supabase_client()
-                    client.table(table_name).upsert(record).execute()
-                    return True
-
-                _upsert_with_retry()
+                # Perform upsert
+                client.table(table_name).upsert(record).execute()
                 processed += 1
-                logger.debug(f"Successfully upserted record to {table_name}")
-
-            except CircuitBreakerError:
-                logger.error(f"Circuit breaker is open for ingestion operations")
-                failed += len(batch_records) - processed
-                break
-
             except Exception as e:
-                logger.error(f"Failed to upsert record to {table_name} after all retries: {str(e)}")
+                logger.error(f"Failed to upsert record: {str(e)}")
                 failed += 1
 
         return {'processed': processed, 'failed': failed}
 
-    # Use transaction manager for batch processing
-    # Import with full path handling for Render to bypass PYTHONPATH issues
-    import importlib.util
-    import sys
 
-    # Get the directory where this file (supabase_client.py) is located
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    # Construct path to transaction_manager.py
-    tm_path = os.path.join(current_dir, 'transaction_manager.py')
-
-    # Load the module dynamically if not already loaded
-    if 'transaction_manager' not in sys.modules:
-        spec = importlib.util.spec_from_file_location('transaction_manager', tm_path)
-        tm_module = importlib.util.module_from_spec(spec)
-        sys.modules['transaction_manager'] = tm_module
-        spec.loader.exec_module(tm_module)
-
-    from transaction_manager import TransactionManager
-
-    manager = TransactionManager()
-    result = manager.execute_batch(
-        records=records,
-        operation_func=batch_operation,
-        validator_func=validator_func,
-        batch_size=50  # Process in batches of 50
-    )
-
-    return result.to_dict()
-
-
-def upsert_warehouses(records: List[Dict[str, Any]]) -> Dict[str, int]:
+def upsert_records_batch(
+    table_name: str,
+    records: List[Dict[str, Any]],
+    validator_func: Optional[Any] = None
+) -> Dict[str, int]:
     """
-    Upsert warehouse records to Supabase with transactional batch processing.
+    Upsert records to Supabase with optional validation.
     """
-    from transaction_manager import validate_warehouse_record
+    if not records:
+        return {'processed': 0, 'failed': 0, 'is_partial': False}
 
+    # Validate records if validator provided
     clean_records = []
-
     for record in records:
-        try:
-            clean_records.append({
-                'warehouse_code': record.get('warehouse_code'),
-                'warehouse_name': record.get('warehouse_name'),
-                'region': record.get('region', 'UNKNOWN'),
-                'is_active': bool(record.get('is_active', 1)),
-                'updated_at': datetime.utcnow().isoformat()
-            })
-        except Exception as e:
-            logger.error(f"Error preparing warehouse record: {str(e)}")
+        if validator_func:
+            is_valid, error_msg = validator_func(record)
+            if not is_valid:
+                logger.warning(f"Record validation failed: {error_msg}")
+                continue
+        clean_records.append(record)
 
-    return upsert_records_batch('warehouses', clean_records, validate_warehouse_record)
+    # Use the simple upsert_records function
+    return upsert_records(table_name, clean_records)
 
 
 def upsert_vendors(records: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -286,7 +216,7 @@ def upsert_inventory(records: List[Dict[str, Any]]) -> Dict[str, int]:
 
     CRITICAL: This table joins items and warehouses, so consistency is vital.
     """
-    from transaction_manager import validate_inventory_record
+    # Removed transaction_manager import
 
     clean_records = []
 
@@ -305,14 +235,14 @@ def upsert_inventory(records: List[Dict[str, Any]]) -> Dict[str, int]:
         except Exception as e:
             logger.error(f"Error preparing inventory record: {str(e)}")
 
-    return upsert_records_batch('inventory_current', clean_records, validate_inventory_record)
+    return upsert_records_batch('inventory_current', clean_records)
 
 
 def upsert_sales_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
     """
     Upsert sales order records to Supabase with transactional batch processing.
     """
-    from transaction_manager import validate_sales_order_record
+    # Removed transaction_manager import
 
     clean_records = []
 
@@ -332,14 +262,14 @@ def upsert_sales_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
         except Exception as e:
             logger.error(f"Error preparing sales order record: {str(e)}")
 
-    return upsert_records_batch('sales_orders', clean_records, validate_sales_order_record)
+    return upsert_records_batch('sales_orders', clean_records)
 
 
 def upsert_purchase_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
     """
     Upsert purchase order records to Supabase with transactional batch processing.
     """
-    from transaction_manager import validate_purchase_order_record
+    # Removed transaction_manager import
 
     clean_records = []
 
@@ -359,7 +289,7 @@ def upsert_purchase_orders(records: List[Dict[str, Any]]) -> Dict[str, int]:
         except Exception as e:
             logger.error(f"Error preparing purchase order record: {str(e)}")
 
-    return upsert_records_batch('purchase_orders', clean_records, validate_purchase_order_record)
+    return upsert_records_batch('purchase_orders', clean_records)
 
 
 def upsert_costs(records: List[Dict[str, Any]]) -> Dict[str, int]:
