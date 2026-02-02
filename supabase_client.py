@@ -170,6 +170,25 @@ def upsert_records_batch(
     return upsert_records(table_name, clean_records)
 
 
+def upsert_warehouses(records: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Upsert warehouse records to Supabase."""
+    clean_records = []
+
+    for record in records:
+        try:
+            clean_records.append({
+                'warehouse_code': record.get('warehouse_code'),
+                'warehouse_name': record.get('warehouse_name'),
+                'region': record.get('region', 'UNKNOWN'),
+                'is_active': bool(record.get('is_active', 1)),
+                'updated_at': datetime.utcnow().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"Error preparing warehouse record: {str(e)}")
+
+    return upsert_records('warehouses', clean_records)
+
+
 def upsert_vendors(records: List[Dict[str, Any]]) -> Dict[str, int]:
     """Upsert vendor records to Supabase."""
     clean_records = []
