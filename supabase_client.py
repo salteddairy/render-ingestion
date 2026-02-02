@@ -248,6 +248,8 @@ def upsert_inventory(records: List[Dict[str, Any]]) -> Dict[str, int]:
                 'on_order_qty': float(record.get('on_order_qty', 0)),
                 'committed_qty': float(record.get('committed_qty', 0)),
                 # NOTE: available_qty is a GENERATED column, do not insert
+                # uom is a required field - default to 'EA' (Each)
+                'uom': record.get('uom', 'EA'),
                 'unit_cost': float(record.get('unit_cost', 0)),
                 'updated_at': datetime.utcnow().isoformat()
             })
