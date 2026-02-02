@@ -215,7 +215,8 @@ def ingest_data():
 
         logger.info(f"Successfully processed {result['processed']} records")
 
-        return jsonify({
+        # Build response with all result fields
+        response_data = {
             "success": True,
             "message": "Data ingested successfully",
             "data_type": data_type,
@@ -223,7 +224,19 @@ def ingest_data():
             "records_processed": result['processed'],
             "records_failed": result.get('failed', 0),
             "timestamp": datetime.utcnow().isoformat()
-        }), 200
+        }
+
+        # Include additional error details if present
+        if 'rejected_warehouses' in result:
+            response_data['rejected_warehouses'] = result['rejected_warehouses']
+        if 'invalid_warehouse_codes' in result:
+            response_data['invalid_warehouse_codes'] = result['invalid_warehouse_codes']
+        if 'rejected_records_sample' in result:
+            response_data['rejected_records_sample'] = result['rejected_records_sample']
+        if 'errors' in result:
+            response_data['errors'] = result['errors']
+
+        return jsonify(response_data), 200
 
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}", exc_info=True)
